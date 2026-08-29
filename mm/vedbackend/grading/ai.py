@@ -4,16 +4,15 @@ import re
 from django.conf import settings
 from google import genai
 from google.genai import types
+from openai import OpenAI
 
 
-# ============================================================
-# GEMINI
-# ============================================================
 
-MODEL = "gemini-3.5-flash"
 
-client = genai.Client(
-    api_key=settings.GEMINI_API_KEY
+MODEL = "gpt-5.6"
+
+client = OpenAI(
+    api_key=settings.OPENAI_API_KEY
 )
 
 
