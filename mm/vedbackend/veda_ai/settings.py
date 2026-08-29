@@ -20,7 +20,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 DEBUG = os.getenv("DEBUG", "False") == "True"
-ALLOWED_HOSTS = ["https://vedai-4.onrender.com/","127.0.0.1","localhost"]  
+ALLOWED_HOSTS = [
+    "vedai-4.onrender.com",
+    "127.0.0.1",
+    "localhost",
+]
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
