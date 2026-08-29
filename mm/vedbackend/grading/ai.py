@@ -4,14 +4,15 @@ import re
 from django.conf import settings
 from google import genai
 from google.genai import types
-from openai import OpenAI
 
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
+MODEL = "gemini-3.5-flash"
 
-MODEL = "gpt-5.6"
-
-client = OpenAI(
+client = genai.Client(
     api_key=settings.OPENAI_API_KEY
 )
 
@@ -21,15 +22,27 @@ client = OpenAI(
 # ============================================================
 
 def parse_json(text):
+    """
+    Safely parse JSON returned by Gemini.
+
+    Handles:
+        - normal JSON
+        - ```json ... ```
+        - ``` ... ```
+        - JSON embedded inside additional text
+    """
 
     if not text:
         raise ValueError(
-            "Empty Gemini response"
+            "Empty Gemini response."
         )
 
-    text = text.strip()
+    text = str(text).strip()
 
-    # Remove ```json
+    # --------------------------------------------------------
+    # Remove markdown code fences
+    # --------------------------------------------------------
+
     text = re.sub(
         r"^```(?:json)?\s*",
         "",
@@ -37,7 +50,6 @@ def parse_json(text):
         flags=re.IGNORECASE,
     )
 
-    # Remove ```
     text = re.sub(
         r"\s*```$",
         "",
@@ -46,14 +58,20 @@ def parse_json(text):
 
     text = text.strip()
 
+    # --------------------------------------------------------
     # Normal JSON
+    # --------------------------------------------------------
+
     try:
         return json.loads(text)
 
     except json.JSONDecodeError:
         pass
 
-    # Try extracting JSON object
+    # --------------------------------------------------------
+    # Extract JSON object
+    # --------------------------------------------------------
+
     start = text.find("{")
     end = text.rfind("}")
 
@@ -67,8 +85,26 @@ def parse_json(text):
         except json.JSONDecodeError:
             pass
 
+    # --------------------------------------------------------
+    # Extract JSON array
+    # --------------------------------------------------------
+
+    start = text.find("[")
+    end = text.rfind("]")
+
+    if start >= 0 and end > start:
+
+        try:
+            return json.loads(
+                text[start:end + 1]
+            )
+
+        except json.JSONDecodeError:
+            pass
+
     raise ValueError(
-        f"Invalid Gemini JSON:\n{text[:2000]}"
+        "Invalid Gemini JSON response:\n"
+        + text[:3000]
     )
 
 
@@ -77,6 +113,9 @@ def parse_json(text):
 # ============================================================
 
 def image_part(png_bytes):
+    """
+    Convert PNG bytes into Gemini image input.
+    """
 
     return types.Part.from_bytes(
         data=png_bytes,
@@ -85,7 +124,28 @@ def image_part(png_bytes):
 
 
 # ============================================================
-# QUESTION EXTRACTION
+# GEMINI RESPONSE HELPER
+# ============================================================
+
+def get_response_text(response):
+    """
+    Extract text from Gemini response.
+    """
+
+    text = getattr(
+        response,
+        "text",
+        None,
+    )
+
+    if text:
+        return text.strip()
+
+    return ""
+
+
+# ============================================================
+# QUESTION EXTRACTION PROMPT
 # ============================================================
 
 QUESTION_PROMPT = r"""
@@ -127,6 +187,8 @@ Must become:
 
 Return ONLY JSON.
 
+Expected structure:
+
 {
   "questions": [
     {
@@ -139,9 +201,25 @@ Return ONLY JSON.
 """
 
 
+# ============================================================
+# QUESTION EXTRACTION
+# ============================================================
+
 def extract_questions(pages):
 
     contents = []
+
+    # --------------------------------------------------------
+    # Add question extraction prompt
+    # --------------------------------------------------------
+
+    contents.append(
+        QUESTION_PROMPT
+    )
+
+    # --------------------------------------------------------
+    # Add every question-paper page
+    # --------------------------------------------------------
 
     for page in pages:
 
@@ -151,9 +229,9 @@ def extract_questions(pages):
             )
         )
 
-    contents.append(
-        QUESTION_PROMPT
-    )
+    # --------------------------------------------------------
+    # Gemini request
+    # --------------------------------------------------------
 
     response = client.models.generate_content(
         model=MODEL,
@@ -164,16 +242,46 @@ def extract_questions(pages):
         ),
     )
 
+    # --------------------------------------------------------
+    # Read response
+    # --------------------------------------------------------
+
+    response_text = get_response_text(
+        response
+    )
+
     data = parse_json(
-        response.text
+        response_text
     )
 
     questions = []
 
-    for item in data.get(
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+
+    raw_questions = data.get(
         "questions",
         [],
+    )
+
+    if not isinstance(
+        raw_questions,
+        list,
     ):
+        return []
+
+    # --------------------------------------------------------
+    # Clean questions
+    # --------------------------------------------------------
+
+    for item in raw_questions:
+
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
 
         number = str(
             item.get(
@@ -220,7 +328,7 @@ def extract_questions(pages):
 
 
 # ============================================================
-# ANSWER DETECTION
+# ANSWER DETECTION PROMPT
 # ============================================================
 
 ANSWER_PROMPT = r"""
@@ -228,10 +336,13 @@ You are an expert handwritten examination answer-sheet analyzer.
 
 Analyze ONE page of a student's handwritten answer sheet.
 
-Your job is ONLY to detect answer blocks and READ THE QUESTION
-REFERENCE written by the student.
+Your job is ONLY to:
 
-Python will perform the final mapping.
+1. Detect answer blocks.
+2. Read the QUESTION REFERENCE written by the student.
+3. Return the bounding boxes around the student's answer.
+
+Python will perform the final question mapping.
 
 DO NOT map answers yourself.
 
@@ -372,8 +483,7 @@ Return them in the order visible on this page.
 BOUNDING BOXES
 ============================================================
 
-Return tight bounding boxes around the student's actual
-handwriting.
+Return tight bounding boxes around the student's actual handwriting.
 
 Do NOT include:
 
@@ -417,6 +527,8 @@ OUTPUT
 
 Return ONLY JSON.
 
+Expected structure:
+
 {
   "matches": [
     {
@@ -439,6 +551,10 @@ Return ONLY JSON.
 """
 
 
+# ============================================================
+# ANSWER DETECTION
+# ============================================================
+
 def extract_answer_mapping(
     page,
     questions,
@@ -449,16 +565,21 @@ def extract_answer_mapping(
         ANSWER_PROMPT
         + "\n\n"
         + f"This is answer-sheet page "
-        f"{page['page_number']} of "
-        f"{total_pages}."
+        + f"{page['page_number']} of "
+        + f"{total_pages}."
     )
 
     contents = [
+        prompt,
+
         image_part(
             page["png_bytes"]
         ),
-        prompt,
     ]
+
+    # --------------------------------------------------------
+    # Gemini request
+    # --------------------------------------------------------
 
     response = client.models.generate_content(
         model=MODEL,
@@ -469,8 +590,16 @@ def extract_answer_mapping(
         ),
     )
 
+    # --------------------------------------------------------
+    # Parse
+    # --------------------------------------------------------
+
+    response_text = get_response_text(
+        response
+    )
+
     data = parse_json(
-        response.text
+        response_text
     )
 
     matches = data.get(
@@ -505,13 +634,6 @@ def extract_answer_mapping(
 # GRADING PROMPT
 # ============================================================
 
-# IMPORTANT:
-#
-# Because this prompt uses .format(), literal JSON braces
-# MUST be written as {{ and }}.
-#
-# {question_text} and {max_marks} are actual variables.
-
 GRADE_PROMPT = r"""
 You are an experienced examination grader.
 
@@ -538,7 +660,9 @@ RULES:
 - Keep feedback concise.
 - Never award more than the maximum marks.
 
-Return ONLY JSON in this exact structure:
+Return ONLY JSON.
+
+Expected structure:
 
 {{
   "marks": 2,
@@ -568,37 +692,50 @@ def grade_answer(
         }
 
     # --------------------------------------------------------
-    # Build Gemini contents
+    # Maximum marks
     # --------------------------------------------------------
 
-    contents = []
+    try:
+
+        maximum = float(
+            question.get(
+                "max_marks",
+                0,
+            )
+        )
+
+    except (
+        ValueError,
+        TypeError,
+    ):
+
+        maximum = 0
+
+    # --------------------------------------------------------
+    # Build prompt
+    # --------------------------------------------------------
+
+    grading_prompt = GRADE_PROMPT.format(
+        question_text=question.get(
+            "text",
+            "",
+        ),
+        max_marks=maximum,
+    )
+
+    contents = [
+        grading_prompt
+    ]
+
+    # --------------------------------------------------------
+    # Add answer images
+    # --------------------------------------------------------
 
     for crop in crop_png_list:
 
         contents.append(
             image_part(crop)
         )
-
-    # --------------------------------------------------------
-    # Add grading prompt
-    # --------------------------------------------------------
-
-    try:
-
-        grading_prompt = GRADE_PROMPT.format(
-            question_text=question["text"],
-            max_marks=question["max_marks"],
-        )
-
-    except KeyError as exc:
-
-        raise ValueError(
-            f"Invalid GRADE_PROMPT format variable: {exc}"
-        )
-
-    contents.append(
-        grading_prompt
-    )
 
     # --------------------------------------------------------
     # Gemini request
@@ -614,11 +751,15 @@ def grade_answer(
     )
 
     # --------------------------------------------------------
-    # Parse response
+    # Parse
     # --------------------------------------------------------
 
+    response_text = get_response_text(
+        response
+    )
+
     data = parse_json(
-        response.text
+        response_text
     )
 
     # --------------------------------------------------------
@@ -640,26 +781,6 @@ def grade_answer(
     ):
 
         marks = 0
-
-    # --------------------------------------------------------
-    # Maximum marks
-    # --------------------------------------------------------
-
-    try:
-
-        maximum = float(
-            question.get(
-                "max_marks",
-                0,
-            )
-        )
-
-    except (
-        ValueError,
-        TypeError,
-    ):
-
-        maximum = 0
 
     # --------------------------------------------------------
     # Clamp marks
