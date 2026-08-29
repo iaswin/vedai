@@ -10,21 +10,98 @@ def crop_box(
 ) -> bytes:
     """
     Crop a normalized bounding box from a PNG.
-
-    A small padding is added so that handwriting near
-    the edge of a detected box isn't accidentally cut.
     """
+
+    if not png_bytes:
+        raise ValueError(
+            "Empty PNG bytes."
+        )
 
     image = Image.open(
         io.BytesIO(png_bytes)
-    ).convert("RGB")
+    )
+
+    image.load()
+
+    image = image.convert(
+        "RGB"
+    )
 
     width, height = image.size
 
-    x = float(box["x"])
-    y = float(box["y"])
-    w = float(box["w"])
-    h = float(box["h"])
+    try:
+
+        x = float(
+            box["x"]
+        )
+
+        y = float(
+            box["y"]
+        )
+
+        w = float(
+            box["w"]
+        )
+
+        h = float(
+            box["h"]
+        )
+
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+
+        raise ValueError(
+            f"Invalid bounding box: {box}"
+        ) from exc
+
+    # --------------------------------------------------------
+    # Clamp
+    # --------------------------------------------------------
+
+    x = max(
+        0.0,
+        min(
+            1.0,
+            x,
+        ),
+    )
+
+    y = max(
+        0.0,
+        min(
+            1.0,
+            y,
+        ),
+    )
+
+    w = max(
+        0.0,
+        min(
+            1.0 - x,
+            w,
+        ),
+    )
+
+    h = max(
+        0.0,
+        min(
+            1.0 - y,
+            h,
+        ),
+    )
+
+    if w <= 0 or h <= 0:
+
+        raise ValueError(
+            f"Invalid bounding box dimensions: {box}"
+        )
+
+    # --------------------------------------------------------
+    # Padding
+    # --------------------------------------------------------
 
     x1 = max(
         0.0,
@@ -46,15 +123,63 @@ def crop_box(
         y + h + padding,
     )
 
-    left = int(x1 * width)
-    top = int(y1 * height)
+    # --------------------------------------------------------
+    # Convert to pixels
+    # --------------------------------------------------------
 
-    right = int(x2 * width)
-    bottom = int(y2 * height)
+    left = int(
+        x1 * width
+    )
 
-    # Prevent zero-size crop.
-    right = max(right, left + 1)
-    bottom = max(bottom, top + 1)
+    top = int(
+        y1 * height
+    )
+
+    right = int(
+        x2 * width
+    )
+
+    bottom = int(
+        y2 * height
+    )
+
+    # --------------------------------------------------------
+    # Prevent zero-size crop
+    # --------------------------------------------------------
+
+    right = max(
+        right,
+        left + 1,
+    )
+
+    bottom = max(
+        bottom,
+        top + 1,
+    )
+
+    right = min(
+        right,
+        width,
+    )
+
+    bottom = min(
+        bottom,
+        height,
+    )
+
+    if right <= left:
+        raise ValueError(
+            "Crop width is zero."
+        )
+
+    if bottom <= top:
+        raise ValueError(
+            "Crop height is zero."
+        )
+
+    # --------------------------------------------------------
+    # Crop
+    # --------------------------------------------------------
 
     cropped = image.crop(
         (
@@ -64,6 +189,10 @@ def crop_box(
             bottom,
         )
     )
+
+    # --------------------------------------------------------
+    # Return PNG
+    # --------------------------------------------------------
 
     buffer = io.BytesIO()
 
@@ -80,8 +209,12 @@ def get_answer_crops(
     mapping,
     answer_pages,
 ):
+    """
+    Return cropped answer images for a question.
+    """
+
     page_lookup = {
-        page["page_number"]: page
+        int(page["page_number"]): page
         for page in answer_pages
     }
 
@@ -94,37 +227,41 @@ def get_answer_crops(
 
     crops = []
 
+    boxes_by_page = question.get(
+        "boxes_by_page",
+        {}
+    )
+
     for page_num in sorted(
-        question["boxes_by_page"],
+        boxes_by_page,
         key=lambda value: int(value),
     ):
 
+        page_number = int(
+            page_num
+        )
+
         page = page_lookup.get(
-            int(page_num)
+            page_number
         )
 
         if not page:
             continue
 
-        boxes = question[
-            "boxes_by_page"
-        ][page_num]
+        boxes = boxes_by_page[
+            page_num
+        ]
 
         for box in boxes:
 
-            try:
-                crop = crop_box(
-                    page["png_bytes"],
-                    box,
-                )
-            except Exception:
-                continue
-
-            crops.append(
-                {
-                    "page_number": int(page_num),
-                    "image": crop,
-                }
+            crop = crop_box(
+                page["png_bytes"],
+                box,
             )
+
+            crops.append({
+                "page_number": page_number,
+                "image": crop,
+            })
 
     return crops
